@@ -1,0 +1,289 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 30 15% 7%;
+    --foreground: 40 30% 92%;
+    --card: 30 20% 11%;
+    --card-foreground: 40 30% 92%;
+    --popover: 30 20% 9%;
+    --popover-foreground: 40 30% 92%;
+    --primary: 0 60% 45%;
+    --primary-foreground: 40 30% 96%;
+    --secondary: 30 25% 16%;
+    --secondary-foreground: 40 30% 92%;
+    --muted: 30 15% 16%;
+    --muted-foreground: 40 10% 62%;
+    --accent: 45 75% 55%;
+    --accent-foreground: 30 20% 10%;
+    --destructive: 0 70% 45%;
+    --destructive-foreground: 40 30% 96%;
+    --border: 30 20% 20%;
+    --input: 30 20% 16%;
+    --ring: 45 70% 50%;
+    --radius: 0.5rem;
+  }
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+  body {
+    font-family: "Inter", ui-sans-serif, system-ui, sans-serif;
+    background:
+      radial-gradient(1200px 600px at 15% 0%, rgba(139, 90, 43, 0.12), transparent 60%),
+      radial-gradient(1000px 500px at 85% 100%, rgba(15, 61, 46, 0.24), transparent 60%),
+      hsl(var(--background));
+    color: hsl(var(--foreground));
+  }
+  .font-display {
+    font-family: "Cinzel", serif;
+    letter-spacing: 0.04em;
+  }
+}
+
+/* ========================================================================== */
+/* Panel surfaces (quieter than before)                                       */
+/* ========================================================================== */
+
+.leather-panel {
+  background:
+    radial-gradient(circle at 20% 20%, rgba(139, 90, 43, 0.1), transparent 55%),
+    radial-gradient(circle at 80% 80%, rgba(139, 90, 43, 0.06), transparent 60%),
+    linear-gradient(180deg, #1a1310 0%, #110c0a 100%);
+  border: 1px solid rgba(139, 90, 43, 0.35);
+}
+
+/* ========================================================================== */
+/* Log scrollbar                                                              */
+/* ========================================================================== */
+
+.log-scroll::-webkit-scrollbar {
+  width: 5px;
+}
+.log-scroll::-webkit-scrollbar-thumb {
+  background: rgba(139, 90, 43, 0.45);
+  border-radius: 3px;
+}
+.log-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* ========================================================================== */
+/* Territories + attack arrows                                                */
+/* ========================================================================== */
+
+.territory-dot {
+  transition: transform 120ms ease, filter 120ms ease;
+  cursor: pointer;
+}
+.territory-dot:hover {
+  filter: brightness(1.18) drop-shadow(0 0 6px rgba(255, 230, 150, 0.7));
+}
+.territory-selected {
+  filter: drop-shadow(0 0 10px rgba(250, 204, 21, 0.95));
+}
+
+.connection-line {
+  stroke: rgba(233, 220, 193, 0.18);
+  stroke-width: 0.9;
+  stroke-dasharray: 3 4;
+}
+
+.attack-arrow {
+  stroke: #ef4444;
+  stroke-width: 2.4;
+  fill: none;
+  marker-end: url(#arrow);
+  filter: drop-shadow(0 0 4px rgba(239, 68, 68, 0.7));
+  animation: dash 0.9s linear infinite;
+}
+@keyframes dash {
+  to {
+    stroke-dashoffset: -18;
+  }
+}
+
+/* ========================================================================== */
+/* 3D dice (modal + mini-toast)                                               */
+/* ========================================================================== */
+
+.die3d {
+  width: 52px;
+  height: 52px;
+  border-radius: 10px;
+  background: linear-gradient(145deg, #fff 0%, #d9d2c5 55%, #b7ad9a 100%);
+  color: #1c1208;
+  font-weight: 900;
+  font-size: 28px;
+  font-family: "Cinzel", serif;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow:
+    inset 0 2px 0 rgba(255, 255, 255, 0.9),
+    inset 0 -3px 0 rgba(0, 0, 0, 0.18),
+    0 4px 0 rgba(0, 0, 0, 0.22),
+    0 6px 14px rgba(0, 0, 0, 0.45);
+}
+.die3d.attacker {
+  background: linear-gradient(145deg, #ffdede 0%, #e09a9a 55%, #b04646 100%);
+  color: #fff;
+  text-shadow: 0 1px 1px rgba(0, 0, 0, 0.55);
+}
+.die3d.defender {
+  background: linear-gradient(145deg, #dde9ff 0%, #9cb9e2 55%, #4670b4 100%);
+  color: #fff;
+  text-shadow: 0 1px 1px rgba(0, 0, 0, 0.55);
+}
+.die3d.rolling {
+  animation: die-tumble 0.5s cubic-bezier(0.4, 0.05, 0.4, 1);
+}
+
+/* Small dice used in the floating battle toast */
+.die-mini {
+  display: inline-flex;
+  width: 22px;
+  height: 22px;
+  border-radius: 5px;
+  font-size: 13px;
+  font-weight: 900;
+  font-family: "Cinzel", serif;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  text-shadow: 0 1px 1px rgba(0, 0, 0, 0.5);
+  animation: die-tumble 0.45s cubic-bezier(0.4, 0.05, 0.4, 1);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.4),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.25),
+    0 2px 4px rgba(0, 0, 0, 0.4);
+}
+.die-mini.attacker {
+  background: linear-gradient(145deg, #d87070 0%, #8a2f2f 100%);
+}
+.die-mini.defender {
+  background: linear-gradient(145deg, #7a9fd8 0%, #2e5aa8 100%);
+}
+
+@keyframes die-tumble {
+  0% {
+    transform: translateY(-14px) rotate(-22deg) scale(0.85);
+    filter: blur(0.5px);
+  }
+  60% {
+    transform: translateY(4px) rotate(10deg) scale(1.06);
+    filter: blur(0);
+  }
+  100% {
+    transform: translateY(0) rotate(0) scale(1);
+  }
+}
+
+/* ========================================================================== */
+/* Animations                                                                 */
+/* ========================================================================== */
+
+@keyframes pulse-ring {
+  0% {
+    box-shadow: 0 0 0 0 rgba(250, 204, 21, 0.7);
+  }
+  70% {
+    box-shadow: 0 0 0 12px rgba(250, 204, 21, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(250, 204, 21, 0);
+  }
+}
+.animate-pulse-ring {
+  animation: pulse-ring 1.6s infinite;
+}
+
+@keyframes fade-in {
+  0% {
+    opacity: 0;
+    transform: translateY(-2px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.animate-fade-in {
+  animation: fade-in 0.18s ease-out;
+}
+
+.caret {
+  display: inline-block;
+  margin-left: 1px;
+  animation: caret-blink 0.9s step-end infinite;
+}
+@keyframes caret-blink {
+  0%,
+  50% {
+    opacity: 1;
+  }
+  51%,
+  100% {
+    opacity: 0;
+  }
+}
+
+/* Shimmer/skeleton used by the model-loading Select */
+@keyframes shimmer {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(100%);
+  }
+}
+.animate-shimmer {
+  animation: shimmer 1.6s linear infinite;
+}
+
+/* Calm pulse for "waiting for API" toast — neutral, not alarming */
+@keyframes pulse-soft {
+  0%,
+  100% {
+    opacity: 0.95;
+  }
+  50% {
+    opacity: 0.7;
+  }
+}
+.animate-pulse-soft {
+  animation: pulse-soft 2.2s ease-in-out infinite;
+}
+
+/* Global interactive feedback — buttons, links, cards */
+button,
+[role="button"],
+a {
+  transition-property: color, background-color, border-color, box-shadow,
+    transform, opacity;
+  transition-duration: 180ms;
+  transition-timing-function: ease-out;
+}
+button:active:not(:disabled) {
+  transform: translateY(0.5px) scale(0.995);
+}
+
+@keyframes dramatic-pop {
+  0% {
+    transform: scale(0.7);
+    opacity: 0;
+  }
+  60% {
+    transform: scale(1.05);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+.animate-dramatic-pop {
+  animation: dramatic-pop 0.35s cubic-bezier(0.25, 1.4, 0.5, 1) both;
+}
