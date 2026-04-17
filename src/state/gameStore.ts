@@ -89,6 +89,7 @@ function saveAIConfig(cfg: AIConfig) {
 const DEFAULT_PACING: PacingConfig = {
   minActionMs: 1400,
   betweenActionsMs: 650,
+  speed: 1,
 };
 
 const BLANK_PROVIDER_STATUS: ProviderStatusMap = {
@@ -141,6 +142,8 @@ export function makePlayerAIConfig(opts: {
     temperature: opts.temperature ?? 0.55,
     thinking: "",
     thinkingVisible: true,
+    plan: "",
+    actionLabel: "",
   };
 }
 
@@ -300,6 +303,7 @@ function freshInitialState(opts?: NewGameOptions): GameState {
     persistApiKeys: !!loadPersistedKeys(),
     providerStatus: { ...BLANK_PROVIDER_STATUS },
     pacing: DEFAULT_PACING,
+    paused: false,
     rateLimitWait: null,
   };
 }
@@ -325,11 +329,16 @@ interface GameStoreActions {
   setPersistApiKeys: (persist: boolean) => void;
   setPlayerAI: (id: PlayerId, cfg: PlayerAIConfig) => void;
   setPlayerThinking: (id: PlayerId, thinking: string) => void;
+  setPlayerPlan: (id: PlayerId, plan: string) => void;
+  setPlayerActionLabel: (id: PlayerId, label: string) => void;
   togglePlayerThinkingVisible: (id: PlayerId) => void;
   bumpProviderUsage: (id: ProviderId) => void;
   reportRateLimit: (id: ProviderId, waitMs: number) => void;
   clearRateLimitWait: () => void;
   setPacing: (p: Partial<PacingConfig>) => void;
+  setSpeed: (speed: number) => void;
+  togglePause: () => void;
+  setPaused: (paused: boolean) => void;
 
   // ---- game actions ------------------------------------------------------
   newGame: () => void;
@@ -367,6 +376,7 @@ export const useGameStore = create<GameStore>((set, get) => ({
     abortAllInFlight();
     const keepKeys = get().apiKeys;
     const keepPersist = get().persistApiKeys;
+    const keepSpeed = get().pacing.speed;
     const fresh = freshInitialState(opts);
     set({
       ...fresh,
@@ -377,6 +387,8 @@ export const useGameStore = create<GameStore>((set, get) => ({
       aiThinkingSince: null,
       hint: null,
       providerStatus: { ...BLANK_PROVIDER_STATUS },
+      pacing: { ...fresh.pacing, speed: keepSpeed || 1 },
+      paused: false,
       rateLimitWait: null,
     });
   },
@@ -392,6 +404,7 @@ export const useGameStore = create<GameStore>((set, get) => ({
       aiThinking: false,
       aiThinkingSince: null,
       hint: null,
+      paused: false,
     });
   },
   goToMenu: () => set({ lifecycle: "menu" }),
@@ -424,6 +437,28 @@ export const useGameStore = create<GameStore>((set, get) => ({
         players: {
           ...s.players,
           [id]: { ...p, ai: { ...p.ai, thinking } },
+        },
+      };
+    }),
+  setPlayerPlan: (id, plan) =>
+    set((s) => {
+      const p = s.players[id];
+      if (!p.ai) return {};
+      return {
+        players: {
+          ...s.players,
+          [id]: { ...p, ai: { ...p.ai, plan } },
+        },
+      };
+    }),
+  setPlayerActionLabel: (id, actionLabel) =>
+    set((s) => {
+      const p = s.players[id];
+      if (!p.ai) return {};
+      return {
+        players: {
+          ...s.players,
+          [id]: { ...p, ai: { ...p.ai, actionLabel } },
         },
       };
     }),
@@ -469,6 +504,10 @@ export const useGameStore = create<GameStore>((set, get) => ({
   },
   clearRateLimitWait: () => set({ rateLimitWait: null }),
   setPacing: (p) => set((s) => ({ pacing: { ...s.pacing, ...p } })),
+  setSpeed: (speed) =>
+    set((s) => ({ pacing: { ...s.pacing, speed: Math.max(0.25, speed) } })),
+  togglePause: () => set((s) => ({ paused: !s.paused })),
+  setPaused: (paused) => set({ paused }),
 
   // ----------------------------------------------------------------------
   // Legacy aliases (kept working, just route to the new lifecycle fn)

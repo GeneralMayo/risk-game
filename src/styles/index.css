@@ -45,6 +45,18 @@
 }
 
 /* ========================================================================== */
+/* Z-index hierarchy                                                          */
+/* ========================================================================== */
+/*
+ *  z-[5]   in-board click absorber (AI turn)
+ *  z-10    board hover tooltip, HintToast           (info, pointer-events: none)
+ *  z-20    BattleResultDialog, RateLimitOverlay      (status, pointer-events: none)
+ *  z-30    Sidebar menu dropdown, Select dropdown    (popovers - above status)
+ *  z-40    Victory / game-over overlay               (modal-like blocker)
+ *  z-50    Radix Dialog + Tooltip                    (true modals / tooltips)
+ */
+
+/* ========================================================================== */
 /* Panel surfaces (quieter than before)                                       */
 /* ========================================================================== */
 

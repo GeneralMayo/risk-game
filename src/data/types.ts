@@ -28,6 +28,10 @@ export interface PlayerAIConfig {
   thinking: string;
   /** User can hide the thinking panel for this player. */
   thinkingVisible: boolean;
+  /** High-level plan summary (1-2 sentences) shown while the turn plays out. */
+  plan: string;
+  /** Transient label of the currently-executing action ("Attacking X from Y"). */
+  actionLabel: string;
 }
 
 export interface ApiKeys {
@@ -52,6 +56,8 @@ export interface PacingConfig {
   minActionMs: number;
   /** Delay between consecutive AI actions within one turn (ms). */
   betweenActionsMs: number;
+  /** User-facing speed multiplier for AI turn timing. 1x = default. */
+  speed: number;
 }
 
 export type ContinentId =
@@ -182,6 +188,8 @@ export interface GameState {
   persistApiKeys: boolean;
   providerStatus: ProviderStatusMap;
   pacing: PacingConfig;
+  /** When true, AI orchestrator sleeps do not tick; all pacing is frozen. */
+  paused: boolean;
   /** Transient UI flag: "AI is waiting on rate limit" for which provider. */
   rateLimitWait: {
     providerId: ProviderId;

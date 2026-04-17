@@ -67,9 +67,12 @@ export function PhaseBanner({ onOpenCards }: { onOpenCards: () => void }) {
   } else if (phase === "attack") ctaLabel = "End Attack";
   else if (phase === "fortify") ctaLabel = "End Turn";
 
+  const activePlayer = players[currentPlayer];
+  const activeAccent = currentPlayer === "human" ? "#c23b3b" : "#3b7dc2";
+
   return (
     <div className="flex items-center justify-between gap-4 rounded-lg border border-wood/40 bg-card/60 px-4 py-2 backdrop-blur">
-      {/* Left: turn + phase name */}
+      {/* Left: turn + current player + phase name */}
       <div className="flex items-center gap-3">
         <span
           className="font-display text-sm uppercase tracking-[0.25em] text-muted-foreground"
@@ -83,6 +86,28 @@ export function PhaseBanner({ onOpenCards }: { onOpenCards: () => void }) {
               ? "Setup"
               : `Turn ${turnNumber}`}
         </span>
+        {!winner && (
+          <span
+            className={cn(
+              "flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-xs transition-all",
+              aiThinking ? "animate-pulse" : ""
+            )}
+            style={{
+              borderColor: `${activeAccent}55`,
+              background: `${activeAccent}1a`,
+              color: activeAccent,
+            }}
+            title={`${activePlayer.name}'s turn`}
+          >
+            <span
+              className="inline-block h-1.5 w-1.5 rounded-full"
+              style={{ background: activeAccent }}
+            />
+            <span className="truncate max-w-[140px] font-display tracking-widest">
+              {activePlayer.name}
+            </span>
+          </span>
+        )}
         {!winner && !inSetup && activeStep && (
           <span className="flex items-center gap-1.5 font-display text-base tracking-wider text-accent">
             <PhaseIcon id={activeStep.id} />

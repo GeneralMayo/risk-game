@@ -137,8 +137,11 @@ export function Sidebar({
   devMode: boolean;
 }) {
   const { log, newGame, saveGame, loadGame, players } = useGameStore();
+  const mode = useGameStore((s) => s.mode);
   const [soundOn, setSoundOnState] = useState(isSoundEnabled());
-  const [logOpen, setLogOpen] = useState(false);
+  // Default the log open for spectator-heavy modes (AI vs AI) since the
+  // player isn't clicking anything — they'll want a running history.
+  const [logOpen, setLogOpen] = useState(mode === "ai-vs-ai");
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
   const logEndRef = useRef<HTMLDivElement>(null);
@@ -148,16 +151,26 @@ export function Sidebar({
     if (logOpen) logEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [log.length, logOpen]);
 
-  // close menu on outside click
+  // close menu on outside click or Escape
   useEffect(() => {
+    if (!menuOpen) return;
     const onDown = (e: MouseEvent) => {
       if (!menuRef.current?.contains(e.target as Node)) setMenuOpen(false);
     };
-    if (menuOpen) document.addEventListener("mousedown", onDown);
-    return () => document.removeEventListener("mousedown", onDown);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setMenuOpen(false);
+    };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
   }, [menuOpen]);
 
-  const lastLogs = log.slice(-40);
+  // When the log is expanded, render the whole history so spectators can
+  // scroll back. Collapse mode is cheaper (we never show it anyway).
+  const logEntries = logOpen ? log.slice(-200) : [];
 
   return (
     <aside className="relative flex h-full w-full max-w-[320px] flex-col border-l border-border/60 bg-card/30 backdrop-blur-sm">
@@ -197,7 +210,7 @@ export function Sidebar({
               <Menu className="h-4 w-4" />
             </IconButton>
             {menuOpen && (
-              <div className="absolute right-0 top-full z-20 mt-1 w-40 overflow-hidden rounded-md border border-border bg-popover shadow-xl animate-fade-in">
+              <div className="absolute right-0 top-full z-30 mt-1 w-40 overflow-hidden rounded-md border border-border bg-popover shadow-xl animate-fade-in">
                 <MenuItem
                   onClick={() => {
                     setMenuOpen(false);
@@ -300,8 +313,8 @@ export function Sidebar({
           />
         </button>
         {logOpen && (
-          <div className="log-scroll max-h-[34vh] overflow-y-auto border-t border-border/50 bg-black/30 px-3 py-2 text-[11px] leading-relaxed">
-            {lastLogs.map((entry) => (
+          <div className="log-scroll max-h-[42vh] overflow-y-auto border-t border-border/50 bg-black/30 px-3 py-2 text-[11px] leading-relaxed">
+            {logEntries.map((entry) => (
               <div
                 key={entry.id}
                 className={cn(

@@ -40,10 +40,22 @@ export interface LLMFortifyAction {
   fortify: { from: string; to: string; count: number } | null;
 }
 
+/** Full-turn plan: one LLM call, then executed step-by-step by the orchestrator. */
+export interface LLMTurnPlan {
+  type: "plan";
+  /** 1-2 sentence high-level summary, in character. */
+  summary: string;
+  placements: Array<{ territory: string; count: number }>;
+  /** Ordered list of intended attacks — tried in order, at-most-one-conquest each. */
+  attacks: Array<{ from: string; to: string }>;
+  fortify: { from: string; to: string; count: number } | null;
+}
+
 export type LLMAction =
   | LLMPlacementAction
   | LLMAttackAction
   | LLMFortifyAction
+  | LLMTurnPlan
   | { type: "noop" };
 
 export interface ProviderRequest {
@@ -107,6 +119,70 @@ function normalizeDecision(raw: unknown): LLMDecision | null {
     actionRaw = o.action as Record<string, unknown>;
   } else {
     actionRaw = o;
+  }
+
+  // --- Turn plan (summary + placements + attacks + fortify in one response) ---
+  // Recognised by the presence of a top-level "summary" string alongside any
+  // of the three action buckets.
+  const summaryRaw = (o.summary ?? actionRaw.summary) as unknown;
+  if (typeof summaryRaw === "string" && summaryRaw.trim()) {
+    const placementsRaw = Array.isArray(actionRaw.placements)
+      ? actionRaw.placements
+      : [];
+    const attacksRaw = Array.isArray(actionRaw.attacks) ? actionRaw.attacks : [];
+    const fortifyRaw = actionRaw.fortify as
+      | null
+      | { from?: unknown; to?: unknown; count?: unknown }
+      | undefined;
+
+    const placements = (placementsRaw as unknown[])
+      .filter(
+        (p): p is { territory: string; count: number } =>
+          !!p &&
+          typeof (p as { territory?: unknown }).territory === "string" &&
+          typeof (p as { count?: unknown }).count === "number"
+      )
+      .map((p) => ({
+        territory: p.territory,
+        count: Math.max(1, Math.floor(p.count)),
+      }));
+
+    const attacks = (attacksRaw as unknown[])
+      .filter(
+        (a): a is { from: string; to: string } =>
+          !!a &&
+          typeof (a as { from?: unknown }).from === "string" &&
+          typeof (a as { to?: unknown }).to === "string"
+      )
+      .map((a) => ({ from: a.from, to: a.to }));
+
+    let fortify: { from: string; to: string; count: number } | null = null;
+    if (
+      fortifyRaw &&
+      typeof fortifyRaw === "object" &&
+      typeof fortifyRaw.from === "string" &&
+      typeof fortifyRaw.to === "string"
+    ) {
+      fortify = {
+        from: fortifyRaw.from,
+        to: fortifyRaw.to,
+        count:
+          typeof fortifyRaw.count === "number"
+            ? Math.max(1, Math.floor(fortifyRaw.count))
+            : 1,
+      };
+    }
+
+    return {
+      thinking,
+      action: {
+        type: "plan",
+        summary: summaryRaw.trim(),
+        placements,
+        attacks,
+        fortify,
+      },
+    };
   }
 
   const placements = actionRaw.placements;

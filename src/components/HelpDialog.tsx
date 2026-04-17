@@ -47,7 +47,8 @@ export function HelpDialog({
 
         <div className="mt-2 rounded-md border border-border/40 bg-black/20 px-3 py-2 text-[11px] text-muted-foreground">
           <b className="text-foreground">Shortcuts</b> ·{" "}
-          <Key>Esc</Key> deselect · <Key>Space</Key> end phase ·{" "}
+          <Key>Esc</Key> deselect · <Key>Enter</Key> end phase ·{" "}
+          <Key>Space</Key> pause · <Key>+</Key>/<Key>−</Key> speed ·{" "}
           <Key>A</Key> AI strategy · <Key>C</Key> cards ·{" "}
           <Key>?</Key> this help
         </div>

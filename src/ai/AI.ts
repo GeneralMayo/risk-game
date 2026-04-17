@@ -1,17 +1,22 @@
 /**
  * AI orchestrator — player-agnostic, provider-agnostic.
  *
- * For each AI player's turn, the orchestrator:
- *   1. Asks the configured provider (or heuristic) for a structured decision
- *      of the form { thinking: "...", action: {...} }.
- *   2. Publishes the thinking narration to the store so the UI can stream it.
- *   3. Pauses for at least `pacing.minActionMs` from the time thinking was
- *      revealed, so the user can read it.
- *   4. Executes the action against the store.
- *   5. Sleeps `pacing.betweenActionsMs` before the next action.
+ * Plan-then-execute model:
+ *   1. At the START of each AI turn, one LLM call produces a full `TurnPlan`:
+ *        { summary, placements[], attacks[], fortify }.
+ *   2. The plan's `summary` is streamed into the ThinkingPanel (1-2 sentences).
+ *   3. The orchestrator executes the plan step-by-step with visible pacing
+ *      (≈900 ms between actions). During execution it shows ONLY a minimal
+ *      action label like "Attacking India from China" — no per-action
+ *      narration.
+ *   4. After each attack, we check for "major disruption" (a planned attack
+ *      that failed so badly that the rest of the plan no longer makes sense).
+ *      If disrupted, the orchestrator requests a fresh plan, shows the new
+ *      short summary, and continues with the new plan. Minor setbacks are
+ *      tolerated silently.
  *
- * Heuristic fallback is used when the provider returns null (LLM failure,
- * aborted, rate-limited past retries).
+ * Heuristic fallback builds the same TurnPlan shape so the executor code path
+ * is identical whether the LLM is on or off.
  */
 
 import { CONTINENTS, TERRITORIES, TERRITORY_MAP } from "@/data/board";
@@ -26,21 +31,64 @@ import {
 import { SFX } from "@/lib/sound";
 import { registerAbort, useGameStore } from "@/state/gameStore";
 import { getProvider } from "./providers/registry";
-import type { LLMDecision, Provider } from "./providers/types";
+import type { LLMDecision, LLMTurnPlan, Provider } from "./providers/types";
 
+/**
+ * Sleep that honours the spectator controls:
+ *   - `pacing.speed`  — multiplier applied to elapsed time. 2 = twice as fast,
+ *                       0.5 = half speed. So a 900 ms sleep at speed=2 resolves
+ *                       in ~450 real ms.
+ *   - `paused`        — while true, elapsed time does not accumulate. Resumes
+ *                       seamlessly when paused flips back to false.
+ *
+ * Aborts as soon as the signal fires (Quit, New Game, etc.).
+ */
+const SLEEP_POLL_MS = 50;
 const sleep = (ms: number, signal?: AbortSignal) =>
   new Promise<void>((resolve, reject) => {
+    if (ms <= 0) return resolve();
     if (signal?.aborted) return reject(new DOMException("Aborted", "AbortError"));
-    const t = setTimeout(() => {
-      signal?.removeEventListener("abort", onAbort);
-      resolve();
-    }, ms);
+
+    let elapsed = 0;
+    let lastCheck = Date.now();
+    let timer: number | undefined;
+
     const onAbort = () => {
-      clearTimeout(t);
+      if (timer) clearTimeout(timer);
       reject(new DOMException("Aborted", "AbortError"));
     };
     signal?.addEventListener("abort", onAbort, { once: true });
+
+    const tick = () => {
+      if (signal?.aborted) return; // onAbort already rejected
+      const s = useGameStore.getState();
+      const now = Date.now();
+      const real = now - lastCheck;
+      lastCheck = now;
+      if (!s.paused) {
+        const speed = s.pacing.speed > 0 ? s.pacing.speed : 1;
+        elapsed += real * speed;
+      }
+      if (elapsed >= ms) {
+        signal?.removeEventListener("abort", onAbort);
+        resolve();
+        return;
+      }
+      timer = window.setTimeout(tick, SLEEP_POLL_MS);
+    };
+    timer = window.setTimeout(tick, SLEEP_POLL_MS);
   });
+
+// ============================================================================
+// Plan shape (internal — normalised version of LLMTurnPlan)
+// ============================================================================
+
+interface TurnPlan {
+  summary: string;
+  placements: Array<{ territory: TerritoryId; count: number }>;
+  attacks: Array<{ from: TerritoryId; to: TerritoryId }>;
+  fortify: { from: TerritoryId; to: TerritoryId; count: number } | null;
+}
 
 // ============================================================================
 // Lean game-state summary for the LLM
@@ -104,7 +152,7 @@ function weakestEnemyNeighbor(
 }
 
 // ============================================================================
-// Heuristic fallback
+// Heuristic fallback — produces a TurnPlan, same contract as the LLM
 // ============================================================================
 
 export function parseStyle(prompt: string) {
@@ -122,19 +170,6 @@ export function parseStyle(prompt: string) {
       north_america: /north america/.test(p),
     },
   };
-}
-
-function heuristicThinking(
-  persona: string,
-  phase: "reinforce" | "attack" | "fortify",
-  details: string
-): string {
-  const name = persona || "Strategist";
-  if (phase === "reinforce")
-    return `${name}: ${details}`;
-  if (phase === "attack")
-    return `${name}: ${details}`;
-  return `${name}: ${details}`;
 }
 
 function heuristicReinforcements(
@@ -188,31 +223,43 @@ function heuristicReinforcements(
   return placements;
 }
 
-function heuristicAttack(
+function heuristicAttackList(
   s: GameState,
   player: PlayerId,
   style: ReturnType<typeof parseStyle>
-): { from: TerritoryId; to: TerritoryId } | null {
-  const owned = territoriesOwnedBy(s.board, player);
+): Array<{ from: TerritoryId; to: TerritoryId }> {
   const margin = style.aggressive ? 0 : style.defensive ? 2 : 1;
-  type Cand = { from: TerritoryId; to: TerritoryId; delta: number };
-  const cands: Cand[] = [];
-  for (const t of owned) {
-    const myArmies = s.board.armies[t];
-    if (myArmies < 3) continue;
-    const enemies = TERRITORY_MAP[t].neighbors
-      .filter((n) => s.board.owner[n] !== player)
-      .map((n) => ({ n, a: s.board.armies[n] }))
-      .sort((x, y) => x.a - y.a);
-    if (!enemies.length) continue;
-    const weakest = enemies[0];
-    if (myArmies >= weakest.a + margin + 1) {
-      cands.push({ from: t, to: weakest.n, delta: myArmies - weakest.a });
+  // Greedy — pick the best favourable attack, pretend it conquers, repeat up to 3.
+  const plans: Array<{ from: TerritoryId; to: TerritoryId }> = [];
+  const simulated: Record<TerritoryId, number> = { ...s.board.armies };
+  const owner: Record<TerritoryId, PlayerId | null> = { ...s.board.owner };
+  for (let i = 0; i < 3; i++) {
+    const owned = TERRITORIES.map((t) => t.id).filter((t) => owner[t] === player);
+    type Cand = { from: TerritoryId; to: TerritoryId; delta: number };
+    const cands: Cand[] = [];
+    for (const t of owned) {
+      if (simulated[t] < 3) continue;
+      const enemies = TERRITORY_MAP[t].neighbors
+        .filter((n) => owner[n] !== player)
+        .map((n) => ({ n, a: simulated[n] }))
+        .sort((x, y) => x.a - y.a);
+      if (!enemies.length) continue;
+      const weakest = enemies[0];
+      if (simulated[t] >= weakest.a + margin + 1) {
+        cands.push({ from: t, to: weakest.n, delta: simulated[t] - weakest.a });
+      }
     }
+    if (!cands.length) break;
+    cands.sort((a, b) => b.delta - a.delta);
+    const best = cands[0];
+    plans.push({ from: best.from, to: best.to });
+    // Simulate conquest: mover mostly moves to new territory.
+    const moving = Math.max(1, simulated[best.from] - 2);
+    simulated[best.from] -= moving;
+    simulated[best.to] = moving;
+    owner[best.to] = player;
   }
-  if (!cands.length) return null;
-  cands.sort((a, b) => b.delta - a.delta);
-  return { from: cands[0].from, to: cands[0].to };
+  return plans;
 }
 
 function heuristicFortify(
@@ -247,82 +294,79 @@ function heuristicFortify(
   return null;
 }
 
+function heuristicPlan(
+  s: GameState,
+  player: PlayerId,
+  style: ReturnType<typeof parseStyle>,
+  persona: string
+): TurnPlan {
+  const placements = heuristicReinforcements(s, player, style);
+  const attacks = heuristicAttackList(s, player, style);
+  const fortify = heuristicFortify(s, player);
+
+  // Build a short, in-character summary from what we decided.
+  const firstAttack = attacks[0];
+  let intent: string;
+  if (firstAttack) {
+    intent = `press ${TERRITORY_MAP[firstAttack.to].name}`;
+    if (attacks.length > 1) intent += ` then swing further`;
+  } else {
+    intent = style.defensive ? `hold the line` : `fortify and wait`;
+  }
+  const summary = `${persona || "Strategist"}: reinforce the frontier and ${intent}.`;
+  return { summary, placements, attacks, fortify };
+}
+
 // ============================================================================
-// Prompt builders (now asking for {thinking, action})
+// Prompt builders
 // ============================================================================
 
-const JSON_CONTRACT_REINFORCE = `Respond with strict JSON of this shape ONLY:
+const JSON_CONTRACT_PLAN = `Respond with strict JSON of this shape ONLY:
 {
-  "thinking": "<1-2 short sentences, IN CHARACTER, explaining your intent>",
-  "action": { "placements": [{"territory": "<id>", "count": <int>}] }
+  "thinking": "<your private reasoning, <= 60 words>",
+  "summary": "<1-2 sentences in character: the headline plan the player will see>",
+  "action": {
+    "placements": [{"territory": "<my_id>", "count": <int>}],
+    "attacks":    [{"from": "<my_id>", "to": "<adjacent_enemy_id>"}],
+    "fortify":    {"from": "<my_id>", "to": "<my_adjacent_id>", "count": <int>} | null
+  }
 }
-Rules:
-- Only use territory IDs where o === "me".
-- placements counts must sum to exactly the "to_place" value.`;
 
-const JSON_CONTRACT_ATTACK = `Respond with strict JSON of this shape ONLY:
-{
-  "thinking": "<1-2 short sentences, IN CHARACTER>",
-  "action": { "attacks": [{"from": "<my_id>", "to": "<adjacent_enemy_id>"}] }
-}
 Rules:
-- "from" must be a territory you own (o === "me") with a >= 2.
-- "to" must be adjacent to "from" and owned by the enemy.
-- Return {"action": {"attacks": []}} to end the attack phase.
-- Exactly ONE attack per response — we will call you again for the next one.`;
+- placements counts must sum to exactly the "to_place" value. All "territory" values must be ones you own (o === "me").
+- attacks is an ORDERED list of attacks to attempt this turn. Each "from" must be yours with a >= 2, and each "to" must be an enemy territory adjacent to "from" at the moment the attack starts. Up to 3 entries — pick the highest-value ones. Empty list means you attack nothing this turn.
+- fortify may be null (skip). When provided, both territories must be yours and directly adjacent, with from.armies - count >= 1.
+- The SUMMARY is a SHORT player-facing headline (1-2 sentences). The THINKING field is longer private reasoning, but keep it brief.`;
 
-const JSON_CONTRACT_FORTIFY = `Respond with strict JSON of this shape ONLY:
-{
-  "thinking": "<1-2 short sentences, IN CHARACTER>",
-  "action": { "fortify": {"from": "<my_id>", "to": "<my_adjacent_id>", "count": <int>} }
-}
-Rules:
-- Both territories must be owned by you and directly adjacent.
-- Leave >= 1 army behind (from.armies - count >= 1).
-- Use {"action": {"fortify": null}} to skip fortifying.`;
-
-function buildPrompt(
+function buildPlanPrompt(
   s: GameState,
   player: PlayerId,
   voice: string,
-  phase: "reinforce" | "attack" | "fortify"
+  replanHint?: string
 ): { systemPrompt: string; userPrompt: string } {
   const summary = summarizeState(s, player);
   const pName = s.players[player].name;
   const ai = s.players[player].ai!;
-  const system = `${ai.systemPrompt}\n\n${voice}\n\nYou MUST respond with the exact JSON contract the user describes. Keep "thinking" short and in character.`;
-  const contract =
-    phase === "reinforce"
-      ? JSON_CONTRACT_REINFORCE
-      : phase === "attack"
-        ? JSON_CONTRACT_ATTACK
-        : JSON_CONTRACT_FORTIFY;
-  const header = `You are ${pName}. It is your ${phase.toUpperCase()} phase.`;
-  const user = `${header}\n\nGame state (compact JSON — o:"me" means you own it):\n${JSON.stringify(summary)}\n\n${contract}`;
+  const system = `${ai.systemPrompt}\n\n${voice}\n\nYou must respond with the exact JSON contract the user describes.`;
+  const header = `You are ${pName}. It is the start of your turn.`;
+  const replan = replanHint
+    ? `\n\nYour previous plan was disrupted: ${replanHint} Build a FRESH plan from the current state; do not repeat moves that already happened.\n`
+    : "";
+  const user = `${header}${replan}\n\nGame state (compact JSON — o:"me" means you own it):\n${JSON.stringify(summary)}\n\n${JSON_CONTRACT_PLAN}`;
   return { systemPrompt: system, userPrompt: user };
 }
 
 // ============================================================================
-// Provider call with abort + thinking stream + pacing
+// Provider call for the plan
 // ============================================================================
 
-async function requestDecision(
+async function requestPlan(
   player: PlayerId,
-  phase: "reinforce" | "attack" | "fortify"
-): Promise<LLMDecision | null> {
+  replanHint?: string
+): Promise<LLMTurnPlan | null> {
   const s = useGameStore.getState();
   const ai = s.players[player].ai;
-  if (!ai) return null;
-
-  const { registerAbort: reg, setPlayerThinking, bumpProviderUsage, reportRateLimit } =
-    {
-      registerAbort,
-      setPlayerThinking: s.setPlayerThinking,
-      bumpProviderUsage: s.bumpProviderUsage,
-      reportRateLimit: s.reportRateLimit,
-    };
-
-  if (ai.provider === "heuristic") return null;
+  if (!ai || ai.provider === "heuristic") return null;
 
   const provider: Provider | null = getProvider(
     { id: ai.provider, model: ai.model, baseUrl: ai.baseUrl },
@@ -330,31 +374,31 @@ async function requestDecision(
   );
   if (!provider) return null;
 
-  const { controller, release } = reg();
+  const { controller, release } = registerAbort();
   try {
-    const { systemPrompt, userPrompt } = buildPrompt(s, player, ai.personaName, phase);
-    const decision = await provider.decide({
+    const { systemPrompt, userPrompt } = buildPlanPrompt(
+      s,
+      player,
+      ai.personaName,
+      replanHint
+    );
+    const decision: LLMDecision | null = await provider.decide({
       systemPrompt,
       userPrompt,
       temperature: ai.temperature,
       abortSignal: controller.signal,
-      onUsage: () => bumpProviderUsage(ai.provider),
-      onRateLimited: (ms) => {
-        reportRateLimit(ai.provider, ms);
-      },
+      onUsage: () => s.bumpProviderUsage(ai.provider),
+      onRateLimited: (ms) => s.reportRateLimit(ai.provider, ms),
     });
-    if (decision?.thinking) {
-      // Stream it character-by-character.
-      await streamThinking(player, decision.thinking, controller.signal);
-    }
-    return decision;
+    if (!decision) return null;
+    if (decision.action.type !== "plan") return null;
+    return decision.action;
   } catch (err) {
     if ((err as Error).name === "AbortError") return null;
-    console.warn("[AI] provider error", err);
+    console.warn("[AI] plan request error", err);
     return null;
   } finally {
     release();
-    // Only clear rate-limit waiting indicator if no further cooldowns are set.
     setTimeout(() => {
       const cur = useGameStore.getState();
       if (cur.rateLimitWait && Date.now() >= cur.rateLimitWait.resumesAt) {
@@ -365,27 +409,114 @@ async function requestDecision(
 }
 
 /**
- * Stream the thinking narration word-by-word at a readable pace (rather than
- * character-by-character, which reads like a flicker). Targets ~140-180wpm.
+ * Stream the plan summary word-by-word at a readable pace into the thinking
+ * panel's plan field. Targets ~140-180 wpm.
  */
-async function streamThinking(
+async function streamPlanSummary(
   player: PlayerId,
   text: string,
   signal: AbortSignal
 ) {
-  useGameStore.getState().setPlayerThinking(player, "");
-  // Split keeping whitespace so the output always matches the input exactly.
+  useGameStore.getState().setPlayerPlan(player, "");
   const tokens = text.split(/(\s+)/);
   let out = "";
   for (const tok of tokens) {
     if (signal.aborted) return;
     out += tok;
-    useGameStore.getState().setPlayerThinking(player, out);
-    // Pace: short words faster, punctuation gets a tiny beat.
+    useGameStore.getState().setPlayerPlan(player, out);
     const endsWithPause = /[.!?,;:—]$/.test(tok);
-    const delay = endsWithPause ? 140 : 55 + Math.min(80, tok.length * 8);
+    const delay = endsWithPause ? 120 : 45 + Math.min(60, tok.length * 6);
     await sleep(delay);
   }
+}
+
+// ============================================================================
+// Plan sanitisation + execution
+// ============================================================================
+
+function sanitisePlan(
+  raw: LLMTurnPlan | null,
+  s: GameState,
+  player: PlayerId,
+  style: ReturnType<typeof parseStyle>,
+  persona: string
+): TurnPlan {
+  if (!raw) return heuristicPlan(s, player, style, persona);
+
+  const known = (t: TerritoryId) => !!TERRITORY_MAP[t];
+  const placements = raw.placements
+    .filter((p) => known(p.territory) && s.board.owner[p.territory] === player)
+    .map((p) => ({
+      territory: p.territory,
+      count: Math.max(1, Math.floor(p.count)),
+    }));
+
+  const attacks = raw.attacks
+    .filter(
+      (a) =>
+        known(a.from) &&
+        known(a.to) &&
+        TERRITORY_MAP[a.from].neighbors.includes(a.to)
+    )
+    .slice(0, 5); // cap
+
+  let fortify = raw.fortify;
+  if (fortify) {
+    if (
+      !known(fortify.from) ||
+      !known(fortify.to) ||
+      !TERRITORY_MAP[fortify.from].neighbors.includes(fortify.to)
+    ) {
+      fortify = null;
+    }
+  }
+
+  // If the plan has NO placements but we owe armies, fall back to heuristic
+  // placements so we never stall.
+  const fallback = heuristicPlan(s, player, style, persona);
+  const finalPlacements = placements.length ? placements : fallback.placements;
+  const finalAttacks = attacks.length ? attacks : fallback.attacks;
+
+  return {
+    summary:
+      (raw.summary && raw.summary.trim()) ||
+      fallback.summary,
+    placements: finalPlacements,
+    attacks: finalAttacks,
+    fortify: fortify ?? fallback.fortify,
+  };
+}
+
+/** Trim placements so the total equals armiesToPlace, and top up via fallback. */
+function normalisePlacements(
+  placements: Array<{ territory: TerritoryId; count: number }>,
+  s: GameState,
+  player: PlayerId
+): Array<{ territory: TerritoryId; count: number }> {
+  const max = s.players[player].armiesToPlace;
+  let sum = 0;
+  const trimmed = placements
+    .filter((p) => s.board.owner[p.territory] === player)
+    .map((p) => {
+      const c = Math.min(p.count, Math.max(0, max - sum));
+      sum += c;
+      return { territory: p.territory, count: c };
+    })
+    .filter((p) => p.count > 0);
+
+  if (sum < max) {
+    const owned = territoriesOwnedBy(s.board, player);
+    const fallback =
+      owned.find((t) =>
+        TERRITORY_MAP[t].neighbors.some((n) => s.board.owner[n] !== player)
+      ) ?? owned[0];
+    if (fallback) {
+      const existing = trimmed.find((p) => p.territory === fallback);
+      if (existing) existing.count += max - sum;
+      else trimmed.push({ territory: fallback, count: max - sum });
+    }
+  }
+  return trimmed;
 }
 
 // ============================================================================
@@ -394,6 +525,9 @@ async function streamThinking(
 
 const runningFor = new Set<PlayerId>();
 const setupRunningFor = new Set<PlayerId>();
+
+/** How long a single in-turn action label is visible before the next one. */
+const ACTION_STEP_MS = 900;
 
 export async function runAITurn(player?: PlayerId) {
   const store = useGameStore.getState();
@@ -406,226 +540,271 @@ export async function runAITurn(player?: PlayerId) {
 
   runningFor.add(who);
   store.setAIThinking(true);
+  // Reset prior turn's transient narration/label so the panel starts clean.
+  store.setPlayerThinking(who, "");
+  store.setPlayerActionLabel(who, "");
 
-  const pacing = store.pacing;
   const ai = store.players[who].ai!;
   const style = parseStyle(ai.systemPrompt);
 
   try {
-    // === REINFORCE ===
+    // Trade cards once up-front so reinforcements in the plan are aware of the
+    // bonus armies.
     await aiMaybeTradeCards(who);
 
-    const state0 = useGameStore.getState();
-    const actionStart = Date.now();
-    const llm = await requestDecision(who, "reinforce");
-    let placements: Array<{ territory: TerritoryId; count: number }> | null =
-      null;
-    if (llm && llm.action.type === "reinforce") {
-      placements = llm.action.placements
-        .filter((p) => TERRITORY_MAP[p.territory])
-        .map((p) => ({
-          territory: p.territory,
-          count: Math.max(1, Math.floor(p.count)),
-        }));
-    }
-    if (!placements || placements.length === 0) {
-      placements = heuristicReinforcements(state0, who, style);
-      useGameStore
-        .getState()
-        .setPlayerThinking(
-          who,
-          heuristicThinking(
-            ai.personaName,
-            "reinforce",
-            "Reinforce the most-threatened frontier."
-          )
-        );
+    // --- Plan (LLM or heuristic) --------------------------------------------
+    const s0 = useGameStore.getState();
+    const rawPlan = await requestPlan(who);
+    let plan = sanitisePlan(rawPlan, s0, who, style, ai.personaName);
+    plan = {
+      ...plan,
+      placements: normalisePlacements(plan.placements, s0, who),
+    };
+
+    // Stream the plan summary into the panel. The ThinkingPanel will show it
+    // prominently; keep the legacy `thinking` field in sync for a minute to
+    // avoid a jarring empty-panel transition for old UI listeners.
+    const { controller: planStreamCtrl, release: releaseStream } = registerAbort();
+    try {
+      await streamPlanSummary(who, plan.summary, planStreamCtrl.signal);
+    } finally {
+      releaseStream();
     }
 
-    const max = state0.players[who].armiesToPlace;
-    let sum = 0;
-    placements = placements
-      .filter((p) => state0.board.owner[p.territory] === who)
-      .map((p) => {
-        const c = Math.min(p.count, Math.max(0, max - sum));
-        sum += c;
-        return { territory: p.territory, count: c };
-      });
-    if (sum < max) {
-      const owned = territoriesOwnedBy(state0.board, who);
-      const fallback =
-        owned.find((t) =>
-          TERRITORY_MAP[t].neighbors.some((n) => state0.board.owner[n] !== who)
-        ) ?? owned[0];
-      if (fallback) {
-        const existing = placements.find((p) => p.territory === fallback);
-        if (existing) existing.count += max - sum;
-        else placements.push({ territory: fallback, count: max - sum });
-      }
-    }
+    // Tiny beat before the first placement so the reader registers the plan.
+    await sleep(450);
 
-    // Pace the overall "reinforce beat" before starting
-    await waitActionBudget(actionStart, pacing.minActionMs);
+    // --- Execute placements --------------------------------------------------
+    await executePlacements(who, plan.placements);
 
-    for (const p of placements) {
-      if (p.count <= 0) continue;
-      useGameStore.getState().aiPlaceArmies([p]);
-      SFX.place();
-      await sleep(Math.min(300, pacing.betweenActionsMs));
-    }
-    useGameStore.getState().endPhase(); // -> attack
-    await sleep(pacing.betweenActionsMs);
-
-    // === ATTACK ===
-    let attackIters = 0;
-    while (attackIters++ < 25) {
+    // End reinforce -> enter attack
+    {
       const s = useGameStore.getState();
-      if (s.winner || s.phase !== "attack" || s.currentPlayer !== who) break;
-      if (s.lifecycle !== "in-progress") break;
-
-      const start = Date.now();
-      const llm = await requestDecision(who, "attack");
-      let next: { from: TerritoryId; to: TerritoryId } | null = null;
-      if (llm && llm.action.type === "attack" && llm.action.attacks.length) {
-        const a = llm.action.attacks[0];
-        if (TERRITORY_MAP[a.from] && TERRITORY_MAP[a.to])
-          next = { from: a.from, to: a.to };
+      if (!s.winner && s.phase === "reinforce" && s.currentPlayer === who) {
+        s.endPhase();
+        await sleep(350);
       }
-      if (!next) {
-        next = heuristicAttack(s, who, style);
-        if (next) {
-          useGameStore
-            .getState()
-            .setPlayerThinking(
-              who,
-              heuristicThinking(
-                ai.personaName,
-                "attack",
-                `Strike from ${TERRITORY_MAP[next.from].name} at ${TERRITORY_MAP[next.to].name}.`
-              )
-            );
-        } else {
-          useGameStore
-            .getState()
-            .setPlayerThinking(
-              who,
-              heuristicThinking(
-                ai.personaName,
-                "attack",
-                "No favourable attack — holding position."
-              )
-            );
-        }
-      }
-
-      if (!next) break;
-
-      const sNow = useGameStore.getState();
-      if (
-        sNow.board.owner[next.from] !== who ||
-        sNow.board.owner[next.to] === who ||
-        sNow.board.armies[next.from] < 2 ||
-        !TERRITORY_MAP[next.from].neighbors.includes(next.to)
-      ) {
-        break;
-      }
-
-      await waitActionBudget(start, pacing.minActionMs);
-
-      // Blitz
-      SFX.diceRoll();
-      let blitzGuard = 0;
-      while (blitzGuard++ < 20) {
-        const cur = useGameStore.getState();
-        if (cur.winner || cur.lifecycle !== "in-progress") break;
-        if (cur.board.owner[next.from] !== who) break;
-        if (cur.board.owner[next.to] === who) break;
-        if (cur.board.armies[next.from] < 2) break;
-        const d = maxAttackDice(cur.board.armies[next.from]);
-        cur.performAttack(next.from, next.to, d);
-        await sleep(280);
-        const after = useGameStore.getState();
-        if (after.pendingConquer) {
-          const pc = after.pendingConquer;
-          after.moveAfterConquer(pc.from, pc.to, pc.maxMove);
-          SFX.conquer();
-          await sleep(260);
-          break;
-        }
-        SFX.battleHit();
-      }
-      await sleep(pacing.betweenActionsMs);
     }
 
-    // === FORTIFY ===
+    // --- Execute attack list, with replanning on major disruption -----------
+    plan = await executeAttackQueue(who, plan, style, ai.personaName);
+
+    // End attack -> fortify (if nothing forced it already)
     {
       const s = useGameStore.getState();
       if (!s.winner && s.phase === "attack" && s.currentPlayer === who) {
         s.endPhase();
-        await sleep(pacing.betweenActionsMs);
+        await sleep(300);
       }
     }
-    const sFort = useGameStore.getState();
-    if (
-      !sFort.winner &&
-      sFort.phase === "fortify" &&
-      sFort.currentPlayer === who &&
-      sFort.lifecycle === "in-progress"
-    ) {
-      const start = Date.now();
-      const llm = await requestDecision(who, "fortify");
-      let fort: { from: TerritoryId; to: TerritoryId; count: number } | null =
-        null;
-      if (
-        llm &&
-        llm.action.type === "fortify" &&
-        llm.action.fortify &&
-        TERRITORY_MAP[llm.action.fortify.from] &&
-        TERRITORY_MAP[llm.action.fortify.to]
-      ) {
-        fort = {
-          from: llm.action.fortify.from,
-          to: llm.action.fortify.to,
-          count: Math.max(1, Math.floor(llm.action.fortify.count)),
-        };
-      }
-      if (!fort) {
-        fort = heuristicFortify(sFort, who);
-        useGameStore
-          .getState()
-          .setPlayerThinking(
-            who,
-            heuristicThinking(
-              ai.personaName,
-              "fortify",
-              fort
-                ? `Shift ${fort.count} to ${TERRITORY_MAP[fort.to].name}.`
-                : "Hold all positions."
-            )
-          );
-      }
 
-      await waitActionBudget(start, pacing.minActionMs);
-
-      if (
-        fort &&
-        sFort.board.owner[fort.from] === who &&
-        sFort.board.owner[fort.to] === who &&
-        TERRITORY_MAP[fort.from].neighbors.includes(fort.to) &&
-        sFort.board.armies[fort.from] >= 2
-      ) {
-        useGameStore
-          .getState()
-          .performFortify(fort.from, fort.to, fort.count);
-      } else {
-        useGameStore.getState().endPhase();
-      }
-    }
+    // --- Execute fortify -----------------------------------------------------
+    await executeFortify(who, plan.fortify);
   } finally {
-    useGameStore.getState().setAIThinking(false);
+    const cur = useGameStore.getState();
+    cur.setAIThinking(false);
+    cur.setPlayerActionLabel(who, "");
     runningFor.delete(who);
   }
 }
+
+// ----------------------------------------------------------------------------
+// Reinforce
+// ----------------------------------------------------------------------------
+
+async function executePlacements(
+  who: PlayerId,
+  placements: Array<{ territory: TerritoryId; count: number }>
+) {
+  const store = useGameStore.getState();
+  for (const p of placements) {
+    if (!p.count) continue;
+    const s = useGameStore.getState();
+    if (s.winner || s.lifecycle !== "in-progress") return;
+    if (s.currentPlayer !== who || s.phase !== "reinforce") return;
+    store.setPlayerActionLabel(
+      who,
+      `Reinforcing ${TERRITORY_MAP[p.territory]?.name ?? p.territory} (+${p.count})`
+    );
+    s.aiPlaceArmies([p]);
+    SFX.place();
+    await sleep(ACTION_STEP_MS);
+  }
+  store.setPlayerActionLabel(who, "");
+}
+
+// ----------------------------------------------------------------------------
+// Attack queue
+// ----------------------------------------------------------------------------
+
+/** True if a planned attack was a "major disruption" worth replanning over. */
+function isMajorDisruption(
+  atkBefore: number,
+  atkAfter: number,
+  conquered: boolean,
+  defenderAtStart: number
+): boolean {
+  if (conquered) return false;
+  // Attacker wiped down to 1 is always major.
+  if (atkAfter <= 1) return true;
+  // Lost >= 60% of attacker force AND had clear numerical superiority (attacker
+  // had at least +2 over defender at start) — i.e. the plan was predicated on
+  // winning this attack.
+  const lost = atkBefore - atkAfter;
+  if (atkBefore >= defenderAtStart + 2 && lost / atkBefore >= 0.6) return true;
+  return false;
+}
+
+async function executeAttackQueue(
+  who: PlayerId,
+  initialPlan: TurnPlan,
+  style: ReturnType<typeof parseStyle>,
+  persona: string
+): Promise<TurnPlan> {
+  const store = useGameStore.getState();
+  let plan = initialPlan;
+  let safety = 0;
+  let replansUsed = 0;
+  const MAX_REPLANS = 2;
+
+  while (safety++ < 25) {
+    const s = useGameStore.getState();
+    if (s.winner || s.lifecycle !== "in-progress") break;
+    if (s.currentPlayer !== who || s.phase !== "attack") break;
+
+    // Pop the next planned attack; if the queue is empty, we're done.
+    const next = plan.attacks.shift();
+    if (!next) break;
+
+    // Validate mid-flight — the board may have moved since the plan was built.
+    if (
+      s.board.owner[next.from] !== who ||
+      s.board.owner[next.to] === who ||
+      s.board.armies[next.from] < 2 ||
+      !TERRITORY_MAP[next.from].neighbors.includes(next.to)
+    ) {
+      // Stale step — silently skip to the next one.
+      continue;
+    }
+
+    const fromName = TERRITORY_MAP[next.from].name;
+    const toName = TERRITORY_MAP[next.to].name;
+    store.setPlayerActionLabel(who, `Attacking ${toName} from ${fromName}`);
+
+    // Snapshot the armies before we start the blitz so we can detect a badly
+    // failed attack afterwards.
+    const atkBefore = s.board.armies[next.from];
+    const defBefore = s.board.armies[next.to];
+
+    SFX.diceRoll();
+    let blitzGuard = 0;
+    let conquered = false;
+    while (blitzGuard++ < 30) {
+      const cur = useGameStore.getState();
+      if (cur.winner || cur.lifecycle !== "in-progress") break;
+      if (cur.board.owner[next.from] !== who) break;
+      if (cur.board.owner[next.to] === who) {
+        conquered = true;
+        break;
+      }
+      if (cur.board.armies[next.from] < 2) break;
+      const d = maxAttackDice(cur.board.armies[next.from]);
+      cur.performAttack(next.from, next.to, d);
+      await sleep(280);
+      const after = useGameStore.getState();
+      if (after.pendingConquer) {
+        const pc = after.pendingConquer;
+        after.moveAfterConquer(pc.from, pc.to, pc.maxMove);
+        SFX.conquer();
+        conquered = true;
+        await sleep(260);
+        break;
+      }
+      SFX.battleHit();
+    }
+
+    await sleep(ACTION_STEP_MS);
+
+    // Replan check
+    const atkAfter = useGameStore.getState().board.armies[next.from] ?? 0;
+    if (
+      replansUsed < MAX_REPLANS &&
+      isMajorDisruption(atkBefore, atkAfter, conquered, defBefore)
+    ) {
+      replansUsed++;
+      store.setPlayerActionLabel(who, "Reassessing…");
+      const s2 = useGameStore.getState();
+      if (s2.winner || s2.lifecycle !== "in-progress") break;
+      if (s2.currentPlayer !== who || s2.phase !== "attack") break;
+
+      const hint = `the assault on ${toName} from ${fromName} failed (${atkAfter} left).`;
+      const rawReplan = await requestPlan(who, hint);
+      let replan: TurnPlan;
+      if (rawReplan) {
+        replan = sanitisePlan(rawReplan, s2, who, style, persona);
+      } else {
+        // LLM replan failed — ask heuristic for a fresh attack list so the
+        // turn keeps moving.
+        replan = heuristicPlan(s2, who, style, persona);
+      }
+      // Stream the new summary over the old one.
+      const { controller, release } = registerAbort();
+      try {
+        await streamPlanSummary(who, replan.summary, controller.signal);
+      } finally {
+        release();
+      }
+      await sleep(350);
+
+      // Keep the existing plan's fortify if the replan doesn't propose one.
+      plan = {
+        summary: replan.summary,
+        placements: [],
+        attacks: replan.attacks,
+        fortify: replan.fortify ?? plan.fortify,
+      };
+    }
+  }
+
+  store.setPlayerActionLabel(who, "");
+  return plan;
+}
+
+// ----------------------------------------------------------------------------
+// Fortify
+// ----------------------------------------------------------------------------
+
+async function executeFortify(
+  who: PlayerId,
+  fortify: TurnPlan["fortify"]
+) {
+  const s = useGameStore.getState();
+  if (s.winner || s.lifecycle !== "in-progress") return;
+  if (s.currentPlayer !== who || s.phase !== "fortify") return;
+
+  if (
+    fortify &&
+    s.board.owner[fortify.from] === who &&
+    s.board.owner[fortify.to] === who &&
+    TERRITORY_MAP[fortify.from].neighbors.includes(fortify.to) &&
+    s.board.armies[fortify.from] >= 2
+  ) {
+    const fromName = TERRITORY_MAP[fortify.from].name;
+    const toName = TERRITORY_MAP[fortify.to].name;
+    s.setPlayerActionLabel(who, `Fortifying ${toName} from ${fromName}`);
+    await sleep(ACTION_STEP_MS);
+    useGameStore.getState().performFortify(fortify.from, fortify.to, fortify.count);
+  } else {
+    s.setPlayerActionLabel(who, "Holding position");
+    await sleep(600);
+    useGameStore.getState().endPhase();
+  }
+  useGameStore.getState().setPlayerActionLabel(who, "");
+}
+
+// ----------------------------------------------------------------------------
+// Setup & cards helpers
+// ----------------------------------------------------------------------------
 
 async function aiMaybeTradeCards(who: PlayerId) {
   const s = useGameStore.getState();
@@ -640,15 +819,8 @@ async function aiMaybeTradeCards(who: PlayerId) {
     .addLog("ai", `${s.players[who].name} traded a card set for bonus armies.`, who);
 }
 
-/** Ensure we don't return from an action faster than pacing.minActionMs. */
-async function waitActionBudget(startedAt: number, minMs: number) {
-  const elapsed = Date.now() - startedAt;
-  const rem = minMs - elapsed;
-  if (rem > 0) await sleep(rem);
-}
-
 // ============================================================================
-// Setup-phase one-army placement
+// Setup-phase one-army placement (unchanged)
 // ============================================================================
 
 export async function runAISetupPlacement(player?: PlayerId) {

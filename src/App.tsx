@@ -16,6 +16,7 @@ import { MainMenu } from "@/components/MainMenu";
 import { NewGameSetup } from "@/components/NewGameSetup";
 import { QuitDialog } from "@/components/QuitDialog";
 import { RateLimitOverlay } from "@/components/RateLimitOverlay";
+import { GameControls } from "@/components/GameControls";
 import { Button } from "@/components/ui/button";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { useGameStore } from "@/state/gameStore";
@@ -182,9 +183,37 @@ export default function App() {
           setAttackTarget(null);
           setFortifyTarget(null);
         }
-      } else if (e.key === " " || e.key === "Enter") {
+      } else if (e.key === " ") {
+        // Spacebar = pause/resume spectator controls. Works even during AI
+        // turns. Only active while a game is running.
+        if (lifecycle === "in-progress") {
+          useGameStore.getState().togglePause();
+          e.preventDefault();
+        }
+      } else if (e.key === "Enter") {
+        // Enter = end the current phase (human turn only; the store is a
+        // no-op for AI turns).
         if (lifecycle === "in-progress") {
           useGameStore.getState().endPhase();
+          e.preventDefault();
+        }
+      } else if (e.key === "+" || e.key === "=" || e.key === "ArrowRight") {
+        if (lifecycle === "in-progress") {
+          const speeds = [0.5, 1, 2, 3];
+          const cur = useGameStore.getState().pacing.speed;
+          const idx = speeds.findIndex((v) => v >= cur);
+          const next = speeds[Math.min(speeds.length - 1, idx + 1)];
+          useGameStore.getState().setSpeed(next);
+          e.preventDefault();
+        }
+      } else if (e.key === "-" || e.key === "_" || e.key === "ArrowLeft") {
+        if (lifecycle === "in-progress") {
+          const speeds = [0.5, 1, 2, 3];
+          const cur = useGameStore.getState().pacing.speed;
+          // Step down to the largest speed strictly less than cur.
+          let next = speeds[0];
+          for (const v of speeds) if (v < cur) next = v;
+          useGameStore.getState().setSpeed(next);
           e.preventDefault();
         }
       } else if (e.key === "?") {
@@ -375,13 +404,14 @@ export default function App() {
 
           <div className="relative flex-1">
             <Board onTerritoryClick={handleClick} aiActing={isAIActing} />
+            <GameControls />
             <BattleResultDialog />
             <HintToast />
             <RateLimitOverlay />
           </div>
 
           {(lifecycle === "game-over" || lifecycle === "ending") && winner && (
-            <div className="pointer-events-auto absolute inset-0 z-30 flex items-center justify-center bg-background/85 backdrop-blur-md">
+            <div className="pointer-events-auto absolute inset-0 z-40 flex items-center justify-center bg-background/85 backdrop-blur-md">
               <div className="animate-dramatic-pop text-center">
                 <h2
                   className="font-display text-7xl tracking-[0.35em] text-accent"

@@ -38,8 +38,8 @@ export function HintToast() {
         className={cn(
           "rounded-full border px-3 py-1 text-[11px] shadow-lg backdrop-blur-sm",
           hint.tone === "warn"
-            ? "border-red-500/40 bg-red-900/70 text-red-100"
-            : "border-border/60 bg-[#140a04]/90 text-muted-foreground"
+            ? "border-red-500/60 bg-red-950/90 text-red-100"
+            : "border-border/60 bg-[#140a04]/95 text-muted-foreground"
         )}
       >
         {hint.message}

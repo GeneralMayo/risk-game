@@ -454,7 +454,7 @@ export function Board({
           onClick={() =>
             useGameStore.getState().showHint("AI's turn — please wait.", "info")
           }
-          className="absolute inset-0 z-10 cursor-not-allowed bg-transparent"
+          className="absolute inset-0 z-[5] cursor-not-allowed bg-transparent"
         />
       )}
 

@@ -4,9 +4,14 @@ import { cn } from "@/lib/utils";
 import { ChevronDown, Quote } from "lucide-react";
 
 /**
- * AI player's inner monologue. Styled with a subtle left-border accent in the
- * player's colour, italic serif voice, and a quiet card background — meant to
- * feel contained, not splashy.
+ * AI player's turn plan + current action.
+ *
+ * Since the AI refactor to plan-then-execute:
+ *   - `plan` holds the 1-2 sentence headline the player sees for the whole turn
+ *   - `actionLabel` holds a transient "what's happening right now" label that
+ *     updates as each placement / attack / fortify executes
+ *
+ * `thinking` is kept for back-compat but is empty during normal play.
  */
 export function ThinkingPanel({ playerId }: { playerId: PlayerId }) {
   const player = useGameStore((s) => s.players[playerId]);
@@ -18,7 +23,10 @@ export function ThinkingPanel({ playerId }: { playerId: PlayerId }) {
   const accent = playerId === "human" ? "#c23b3b" : "#3b7dc2";
   const isActive = currentPlayer === playerId && aiThinking;
   const visible = player.ai.thinkingVisible;
-  const text = player.ai.thinking;
+  const plan = player.ai.plan ?? "";
+  const actionLabel = player.ai.actionLabel ?? "";
+  const thinking = player.ai.thinking ?? "";
+  const headline = plan || thinking;
 
   return (
     <div
@@ -44,7 +52,7 @@ export function ThinkingPanel({ playerId }: { playerId: PlayerId }) {
             {player.name}
           </span>
           <span className="text-muted-foreground/70">
-            {isActive ? "thinking" : "idle"}
+            {isActive ? (actionLabel ? "acting" : "planning") : "idle"}
           </span>
         </span>
         <ChevronDown
@@ -65,10 +73,12 @@ export function ThinkingPanel({ playerId }: { playerId: PlayerId }) {
             className="pl-3 text-[12px] italic leading-relaxed text-foreground/85"
             style={{ fontFamily: "Cinzel, Georgia, serif", fontWeight: 400 }}
           >
-            {text ? (
+            {headline ? (
               <>
-                {text}
-                {isActive && <span className="caret ml-0.5">▍</span>}
+                {headline}
+                {isActive && !actionLabel && (
+                  <span className="caret ml-0.5">▍</span>
+                )}
               </>
             ) : (
               <span className="text-muted-foreground/70">
@@ -76,6 +86,14 @@ export function ThinkingPanel({ playerId }: { playerId: PlayerId }) {
               </span>
             )}
           </p>
+          {actionLabel && (
+            <p className="mt-1.5 pl-3 text-[10.5px] uppercase tracking-[0.18em] text-muted-foreground">
+              <span className="tabular-nums" style={{ color: accent }}>
+                ▸{" "}
+              </span>
+              {actionLabel}
+            </p>
+          )}
         </div>
       )}
     </div>
